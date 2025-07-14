@@ -22,7 +22,6 @@ from config import (
     CUSTOM_CAPTION,
     DISABLE_CHANNEL_BUTTON,
     PROTECT_CONTENT,
-    OWNER_ID,
 )
 from helper_func import (
     subscribed,
@@ -32,23 +31,19 @@ from helper_func import (
 )
 from database.database import add_user, del_user, full_userbase, present_user
 
+# Razorpay client
+client_rzp = razorpay.Client(auth=("rzp_live_Kfvz8iobE8iUZc", "bcPhJQ2pHTaaF94FhWCEl6eD"))
 PAYMENT_AMOUNT = 2  # INR
 PAYMENT_CURRENCY = "INR"
-RAZORPAY_KEY_ID = "rzp_live_Kfvz8iobE8iUZc"
-RAZORPAY_KEY_SECRET = "bcPhJQ2pHTaaF94FhWCEl6eD"
 
-client_rzp = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-payment_status_cache = {}
+payment_status = {}
 
-# START command handler
 @Bot.on_message(filters.command('start') & filters.private & subscribed)
 async def start_command(client: Client, message: Message):
     id = message.from_user.id
-    owner_id = ADMINS
 
-    if id == owner_id:
-        await message.reply("You are the owner! Additional actions can be added here.")
-        return
+    if id in ADMINS:
+        return await message.reply("You are the owner! Additional actions can be added here.")
 
     if not await present_user(id):
         try:
@@ -62,55 +57,84 @@ async def start_command(client: Client, message: Message):
         except:
             return
 
-        _string = await decode(base64_string)
-        argument = _string.split("-")
+        if id in payment_status and payment_status[id].get("paid"):
+            _string = await decode(base64_string)
+            argument = _string.split("-")
+            if len(argument) == 3:
+                try:
+                    start = int(int(argument[1]) / abs(client.db_channel.id))
+                    end = int(int(argument[2]) / abs(client.db_channel.id))
+                except:
+                    return
+                ids = list(range(start, end + 1)) if start <= end else list(range(start, end - 1, -1))
+            elif len(argument) == 2:
+                try:
+                    ids = [int(int(argument[1]) / abs(client.db_channel.id))]
+                except:
+                    return
 
-        if len(argument) == 3:
+            temp_msg = await message.reply("Please wait...")
             try:
-                start = int(int(argument[1]) / abs(client.db_channel.id))
-                end = int(int(argument[2]) / abs(client.db_channel.id))
+                messages = await get_messages(client, ids)
             except:
+                await message.reply_text("Something went wrong..!")
                 return
-            ids = list(range(start, end + 1)) if start <= end else list(range(start, end - 1, -1))
-        elif len(argument) == 2:
-            try:
-                ids = [int(int(argument[1]) / abs(client.db_channel.id))]
-            except:
-                return
+            await temp_msg.delete()
 
-        order_id = f"order_{id}_{int(time.time())}"
-        order = client_rzp.order.create({
-            "amount": PAYMENT_AMOUNT * 100,
-            "currency": PAYMENT_CURRENCY,
-            "receipt": order_id,
-            "payment_capture": 1,
-        })
+            for msg in messages:
+                caption = (
+                    CUSTOM_CAPTION.format(
+                        previouscaption="" if not msg.caption else msg.caption.html,
+                        filename=msg.document.file_name
+                    ) if bool(CUSTOM_CAPTION) and bool(msg.document) else
+                    "" if not msg.caption else msg.caption.html
+                )
+                reply_markup = msg.reply_markup if DISABLE_CHANNEL_BUTTON else None
 
-        payment_status_cache[id] = {
-            "paid": False,
-            "ids": ids,
-            "order_id": order["id"]
-        }
+                try:
+                    await msg.copy(
+                        chat_id=message.from_user.id,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                        protect_content=PROTECT_CONTENT
+                    )
+                    await asyncio.sleep(0.5)
+                except FloodWait as e:
+                    await asyncio.sleep(e.x)
+                    await msg.copy(
+                        chat_id=message.from_user.id,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                        protect_content=PROTECT_CONTENT
+                    )
+                except:
+                    pass
+        else:
+            order_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+            payment_link = client_rzp.payment_link.create({
+                "amount": PAYMENT_AMOUNT * 100,
+                "currency": PAYMENT_CURRENCY,
+                "description": f"Batch files permission – {id}",
+                "reference_id": order_id,
+                "customer": {"name": message.from_user.first_name},
+                "notify": {"sms": False, "email": False},
+                "reminder_enable": True
+            })
+            link_id = payment_link["id"]
+            pay_url = payment_link["short_url"]
+            payment_status[id] = {"link_id": link_id, "paid": False, "payload": base64_string}
 
-        pay_url = f"https://rzp.io/i/{order['id']}"
-        btn = [[
-            InlineKeyboardButton("Pay ₹2", url=pay_url)
-        ], [
-            InlineKeyboardButton("I've Paid", callback_data=f"confirm_{order['id']}")
-        ]]
-
-        await message.reply(
-            f"To continue, please pay ₹2 using the button below. After payment, click 'I've Paid'.",
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
-
+            buttons = [
+                [InlineKeyboardButton("Pay ₹2", url=pay_url)],
+                [InlineKeyboardButton("I’ve Paid", callback_data=f"checkpay_{id}")]
+            ]
+            await message.reply("Please complete payment to receive the batch files:", reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        reply_markup = InlineKeyboardMarkup(
-            [[
-                InlineKeyboardButton("About Me", callback_data="about"),
-                InlineKeyboardButton("Close", callback_data="close")
-            ]]
-        )
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("About Me", callback_data="about"), InlineKeyboardButton("Close", callback_data="close")]
+        ])
         await message.reply_text(
             text=START_MSG.format(
                 first=message.from_user.first_name,
@@ -124,81 +148,28 @@ async def start_command(client: Client, message: Message):
             quote=True
         )
 
+@Bot.on_callback_query(filters.regex("^checkpay_"))
+async def check_payment(client, callback_query: CallbackQuery):
+    id = int(callback_query.data.split("_", 1)[1])
+    user_data = payment_status.get(id)
+    if not user_data:
+        return await callback_query.answer("No payment initiated.", show_alert=True)
 
-@Bot.on_callback_query(filters.regex("^confirm_"))
-async def confirm_payment(client, callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    if user_id not in payment_status_cache:
-        return await callback_query.answer("No active order found.", show_alert=True)
-
-    order_id = callback_query.data.split("_", 1)[1]
-    try:
-        payments = client_rzp.order.payments(order_id)["items"]
-    except:
-        return await callback_query.answer("Failed to check payment. Try again later.", show_alert=True)
-
-    if not payments:
-        return await callback_query.answer("Payment not received yet.", show_alert=True)
-
-    if payments[0]["status"] == "captured":
-        ids = payment_status_cache[user_id]["ids"]
-        del payment_status_cache[user_id]
-
-        temp_msg = await callback_query.message.reply("Payment confirmed. Fetching files...")
-        try:
-            messages = await get_messages(client, ids)
-        except:
-            return await temp_msg.edit("Something went wrong while fetching messages.")
-
-        await temp_msg.delete()
-
-        for msg in messages:
-            caption = (
-                CUSTOM_CAPTION.format(
-                    previouscaption="" if not msg.caption else msg.caption.html,
-                    filename=msg.document.file_name
-                ) if bool(CUSTOM_CAPTION) and bool(msg.document) else
-                "" if not msg.caption else msg.caption.html
-            )
-
-            reply_markup = msg.reply_markup if DISABLE_CHANNEL_BUTTON else None
-
-            try:
-                await msg.copy(
-                    chat_id=callback_query.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
-                await asyncio.sleep(0.5)
-            except FloodWait as e:
-                await asyncio.sleep(e.x)
-                await msg.copy(
-                    chat_id=callback_query.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
-            except:
-                pass
+    link_id = user_data["link_id"]
+    pl = client_rzp.payment_link.fetch(link_id)
+    if pl["status"] == "paid":
+        payment_status[id]["paid"] = True
+        return await callback_query.message.reply("✅ Payment confirmed. Please click /start again to receive files.")
     else:
-        await callback_query.answer("Payment not completed yet.", show_alert=True)
-
+        return await callback_query.answer("Payment not yet completed.", show_alert=True)
 
 @Bot.on_message(filters.command('start') & filters.private)
 async def not_joined(client: Client, message: Message):
     buttons = [
-        [
-            InlineKeyboardButton("Join Channel", url=client.invitelink),
-            InlineKeyboardButton("Join Channel", url=client.invitelink2),
-        ]
+        [InlineKeyboardButton("Join Channel", url=client.invitelink), InlineKeyboardButton("Join Channel", url=client.invitelink2)]
     ]
     try:
-        buttons.append([
-            InlineKeyboardButton("Try Again", url=f"https://t.me/{client.username}?start={message.command[1]}")
-        ])
+        buttons.append([InlineKeyboardButton("Try Again", url=f"https://t.me/{client.username}?start={message.command[1]}")])
     except IndexError:
         pass
 
@@ -215,16 +186,12 @@ async def not_joined(client: Client, message: Message):
         disable_web_page_preview=True
     )
 
-
-# /users command
 @Bot.on_message(filters.command('users') & filters.private & filters.user(ADMINS))
 async def get_users(client: Bot, message: Message):
     msg = await client.send_message(chat_id=message.chat.id, text="<b>Processing ...</b>")
     users = await full_userbase()
     await msg.edit(f"{len(users)} users are using this bot")
 
-
-# /broadcast command
 @Bot.on_message(filters.private & filters.command('broadcast') & filters.user(ADMINS))
 async def send_text(client: Bot, message: Message):
     if message.reply_to_message:
@@ -262,8 +229,6 @@ async def send_text(client: Bot, message: Message):
 
         return await pls_wait.edit(status)
     else:
-        msg = await message.reply(
-            "<code>Use this command as a reply to any Telegram message without any spaces.</code>"
-        )
+        msg = await message.reply("<code>Use this command as a reply to any Telegram message without any spaces.</code>")
         await asyncio.sleep(8)
         await msg.delete()
