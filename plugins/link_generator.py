@@ -31,7 +31,7 @@ async def batch(client: Client, message: Message):
     encoded_id = encode(f_msg_id)
     user_name = message.from_user.first_name or "Telegram User"
 
-    # Create Razorpay payment link
+    
     payment = create_payment_link(user_name=user_name, purpose="File access ₹2")
     payment_url = payment.get("short_url")
     payment_id = payment.get("id")
@@ -40,7 +40,7 @@ async def batch(client: Client, message: Message):
         await message.reply("❌ Failed to create payment link. Try again later.")
         return
 
-    # Send payment button
+    
     await message.reply(
         "💳 To access this file, please pay ₹2 using the button below.",
         reply_markup=InlineKeyboardMarkup([
@@ -48,7 +48,7 @@ async def batch(client: Client, message: Message):
         ])
     )
 
-    # Poll Razorpay to check if payment is done
+    
     await message.reply("⏳ Waiting for payment confirmation...")
     paid = poll_payment_status(payment_id)
 
