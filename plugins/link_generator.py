@@ -56,7 +56,7 @@ async def batch(client: Client, message: Message):
         await message.reply("✅ Payment received! Sending your file...")
         await client.copy_message(
             chat_id=message.chat.id,
-            from_chat_id=-100,  # ← Replace with your DB Channel ID
+            from_chat_id=-2767674889,  # ← Replace with your DB Channel ID
             message_id=f_msg_id
         )
     else:
