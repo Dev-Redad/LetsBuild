@@ -102,7 +102,7 @@ async def start_command(client: Client, message: Message):
         await message.reply_photo(
             photo=qr_url,
             caption=f"Please pay ₹2 to access your files.\n[Pay Now]({short_url})",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("I've Paid ✅", callback_data=f"checkpay_{id}")]
             ])
