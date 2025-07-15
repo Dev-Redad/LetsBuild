@@ -1,160 +1,76 @@
-# Updated start.py with Razorpay payment integration and ad-token removed
-import asyncio
-import base64
-import logging
 import os
-import random
-import re
-import string
-import time
-
 import razorpay
+import asyncio
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from config import TG_BOT_TOKEN, APP_ID, API_HASH, OWNER_ID
 
-from bot import Bot
-from config import (
-    ADMINS,
-    FORCE_MSG,
-    START_MSG,
-    CUSTOM_CAPTION,
-    DISABLE_CHANNEL_BUTTON,
-    PROTECT_CONTENT,
-    OWNER_ID,
-)
-from helper_func import (
-    subscribed,
-    encode,
-    decode,
-    get_messages,
-)
-from database.database import add_user, del_user, full_userbase, present_user
+api_key = "rzp_live_Kfvz8iobE8iUZc"
+api_secret = "bcPhJQ2pHTaaF94FhWCEl6eD"
 
-RAZORPAY_KEY_ID = "rzp_live_Kfvz8iobE8iUZc"
-RAZORPAY_KEY_SECRET = "bcPhJQ2pHTaaF94FhWCEl6eD"
-razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+bot = Client("PaymentBot", bot_token=TG_BOT_TOKEN, api_id=APP_ID, api_hash=API_HASH)
+razorpay_client = razorpay.Client(auth=(api_key, api_secret))
 
-user_orders = {}
+payment_links = {}  # user_id -> payment_link_id
 
-@Bot.on_message(filters.command('start') & filters.private & subscribed)
-async def start_command(client: Client, message: Message):
-    id = message.from_user.id
-    if not await present_user(id):
-        try:
-            await add_user(id)
-        except:
-            pass
+@bot.on_message(filters.command("start") & filters.private)
+async def start(client, message):
+    await message.reply_text(
+        "👋 Hello! Send me a file link to continue. Each batch costs ₹2.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Buy Now (₹2)", callback_data="pay")]]
+        )
+    )
 
-    if "pay_" in message.text:
-        _, order_id, encoded = message.text.split("_")
-        payment = razorpay_client.order.fetch(order_id)
-        if payment['status'] == 'paid':
-            base64_string = encoded
-            await send_files(client, message, base64_string)
-        else:
-            await message.reply("Payment not completed. Please pay and click 'I've Paid' again.")
+@bot.on_callback_query(filters.regex("^pay"))
+async def pay_cb(client, callback_query):
+    user_id = callback_query.from_user.id
+    payment = razorpay_client.payment_link.create({
+        "amount": 200,
+        "currency": "INR",
+        "description": "Payment for file batch",
+        "customer": {
+            "name": str(callback_query.from_user.first_name),
+            "contact": "9999999999",
+            "email": f"{user_id}@example.com"
+        },
+        "notify": {
+            "sms": False,
+            "email": False
+        },
+        "callback_url": "https://example.com/",
+        "callback_method": "get"
+    })
+
+    payment_links[user_id] = payment['id']
+    pay_url = payment['short_url']
+
+    await callback_query.message.reply_text(
+        f"🧾 Please pay ₹2 using the link below:\n\n<code>{pay_url}</code>",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Pay Now", url=pay_url)],
+             [InlineKeyboardButton("I've Paid", callback_data="verify")]]
+        ),
+        parse_mode="HTML"
+    )
+
+@bot.on_callback_query(filters.regex("^verify"))
+async def verify_payment(client, callback_query):
+    user_id = callback_query.from_user.id
+    link_id = payment_links.get(user_id)
+
+    if not link_id:
+        await callback_query.answer("No payment record found.", show_alert=True)
         return
 
-    elif len(message.text) > 7:
-        try:
-            base64_string = message.text.split(" ", 1)[1]
-        except:
-            return
+    payment_info = razorpay_client.payment_link.fetch(link_id)
+    status = payment_info['status']
 
-        order = razorpay_client.order.create({
-            "amount": 200,  # 2 INR in paise
-            "currency": "INR",
-            "payment_capture": 1
-        })
-
-        payment_url = f"https://rzp.io/l/{order['id']}"
-        user_orders[id] = {"order_id": order['id'], "encoded": base64_string}
-
-        await message.reply(
-            f"To access this file, please pay ₹2.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Pay ₹2", url=payment_url)],
-                [InlineKeyboardButton("I've Paid", callback_data=f"checkpay_{order['id']}")]
-            ])
-        )
+    if status == "paid":
+        await callback_query.message.reply_text("✅ Payment confirmed! Sending your files...")
+        # Send files here
     else:
-        reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("About Me", callback_data="about"),
-             InlineKeyboardButton("Close", callback_data="close")]
-        ])
-        await message.reply_text(
-            text=START_MSG.format(
-                first=message.from_user.first_name,
-                last=message.from_user.last_name,
-                username=None if not message.from_user.username else '@' + message.from_user.username,
-                mention=message.from_user.mention,
-                id=message.from_user.id
-            ),
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-            quote=True
-        )
+        await callback_query.message.reply_text("❌ Payment not found or incomplete.")
 
-@Bot.on_callback_query(filters.regex("checkpay_"))
-async def check_payment(bot: Client, query: CallbackQuery):
-    user_id = query.from_user.id
-    order_id = query.data.split("checkpay_")[1]
-
-    try:
-        payment = razorpay_client.order.fetch(order_id)
-        if payment['status'] == 'paid':
-            encoded = user_orders[user_id]['encoded']
-            await send_files(bot, query.message, encoded)
-            await query.message.delete()
-        else:
-            await query.answer("Payment not completed yet.", show_alert=True)
-    except Exception as e:
-        logging.error(str(e))
-        await query.answer("Could not verify payment.", show_alert=True)
-
-
-async def send_files(client: Client, message: Message, base64_string: str):
-    try:
-        _string = await decode(base64_string)
-        argument = _string.split("-")
-
-        if len(argument) == 3:
-            start = int(int(argument[1]) / abs(client.db_channel.id))
-            end = int(int(argument[2]) / abs(client.db_channel.id))
-            ids = list(range(start, end + 1)) if start <= end else list(range(start, end - 1, -1))
-        else:
-            ids = [int(int(argument[1]) / abs(client.db_channel.id))]
-
-        temp_msg = await message.reply("Please wait...")
-        messages = await get_messages(client, ids)
-        await temp_msg.delete()
-
-        for msg in messages:
-            caption = (
-                CUSTOM_CAPTION.format(
-                    previouscaption="" if not msg.caption else msg.caption.html,
-                    filename=msg.document.file_name
-                ) if bool(CUSTOM_CAPTION) and bool(msg.document) else
-                "" if not msg.caption else msg.caption.html
-            )
-
-            reply_markup = msg.reply_markup if DISABLE_CHANNEL_BUTTON else None
-
-            try:
-                await msg.copy(
-                    chat_id=message.chat.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
-                await asyncio.sleep(0.5)
-            except FloodWait as e:
-                await asyncio.sleep(e.x)
-            except:
-                pass
-    except Exception as e:
-        logging.error(str(e))
-        await message.reply_text("Something went wrong while sending files.")
+print("Bot running...")
+bot.run()
