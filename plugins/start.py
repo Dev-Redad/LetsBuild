@@ -1,4 +1,4 @@
-# (©)CodeXBotz
+#(©)CodeXBotz
 import asyncio
 import base64
 import logging
@@ -8,20 +8,24 @@ import re
 import string
 import time
 
-import razorpay
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 
+import razorpay
 from bot import Bot
 from config import (
     ADMINS,
     FORCE_MSG,
     START_MSG,
     CUSTOM_CAPTION,
+    IS_VERIFY,
+    VERIFY_EXPIRE,
     DISABLE_CHANNEL_BUTTON,
     PROTECT_CONTENT,
+    TUT_VID,
+    OWNER_ID,
 )
 from helper_func import (
     subscribed,
@@ -31,19 +35,21 @@ from helper_func import (
 )
 from database.database import add_user, del_user, full_userbase, present_user
 
-# Razorpay client setup
+# Razorpay Setup
 razorpay_client = razorpay.Client(auth=("rzp_live_Kfvz8iobE8iUZc", "bcPhJQ2pHTaaF94FhWCEl6eD"))
+PAYMENT_AMOUNT = 2  # Rs. 2
+PAYMENT_CURRENCY = "INR"
 
-# Store user batch data in memory
 Bot.batch_data = {}
 
-@Bot.on_message(filters.command('start') & filters.private & subscribed)
+@Bot.on_message(filters.command("start") & filters.private & subscribed)
 async def start_command(client: Client, message: Message):
     id = message.from_user.id
     owner_id = ADMINS
 
     if id == owner_id:
-        return await message.reply("You are the owner! Additional actions can be added here.")
+        await message.reply("You are the owner! Additional actions can be added here.")
+        return
 
     if not await present_user(id):
         try:
@@ -75,35 +81,33 @@ async def start_command(client: Client, message: Message):
         else:
             return
 
-        # Store batch for the user before generating payment
-        client.batch_data[id] = ids
+        order_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
 
-        # Create Razorpay payment
-        order = razorpay_client.order.create({
-            "amount": 200,  # ₹2 in paise
-            "currency": "INR",
-            "payment_capture": 1
+        payment = razorpay_client.payment_link.create({
+            "amount": PAYMENT_AMOUNT * 100,
+            "currency": PAYMENT_CURRENCY,
+            "description": f"Batch files access – {id}",
+            "reference_id": order_id,
+            "customer": {"name": message.from_user.first_name},
+            "notify": {"sms": False, "email": False},
+            "reminder_enable": True
         })
 
-        order_id = order['id']
-        client.batch_data[id] = {
-            "ids": ids,
-            "order_id": order_id
-        }
+        link_id = payment["id"]
+        short_url = payment["short_url"]
+        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={short_url}"
 
-        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=https://rzp.io/i/{order['id']}"
-        pay_url = f"https://rzp.io/i/{order['id']}"
-
-        buttons = [
-            [InlineKeyboardButton("I've Paid ✅", callback_data=f"checkpayment_{order_id}")]
-        ]
+        Bot.batch_data[id] = {"link_id": link_id, "ids": ids}
 
         await message.reply_photo(
             photo=qr_url,
-            caption=f"Pay ₹2 to access your files.\n\n[Pay Now]({pay_url})",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(buttons)
+            caption=f"Please pay ₹2 to access your files.\n[Pay Now]({short_url})",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("I've Paid ✅", callback_data=f"checkpay_{id}")]
+            ])
         )
+        return
 
     else:
         reply_markup = InlineKeyboardMarkup(
@@ -125,30 +129,18 @@ async def start_command(client: Client, message: Message):
             quote=True
         )
 
-@Bot.on_callback_query(filters.regex("^checkpayment_"))
-async def check_payment(client: Client, callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    order_id = callback_query.data.split("_", 1)[1]
 
-    try:
-        payments = razorpay_client.order.payments(order_id)
-        success = any(p.get("status") == "captured" for p in payments.get("items", []))
-    except Exception as e:
-        return await callback_query.message.edit_text("Failed to check payment status. Please try again later.")
+@Bot.on_callback_query(filters.regex("checkpay_(.*)"))
+async def check_payment_callback(client, callback_query: CallbackQuery):
+    user_id = int(callback_query.data.split("_", 1)[1])
+    data = Bot.batch_data.get(user_id)
+    if not data:
+        return await callback_query.message.edit("Session expired or invalid.")
 
-    if success:
-        data = client.batch_data.get(user_id)
-        if not data:
-            return await callback_query.message.edit_text("Batch expired or not found.")
-
-        ids = data['ids']
-        try:
-            messages = await get_messages(client, ids)
-        except:
-            return await callback_query.message.edit_text("Failed to fetch messages. Please try again.")
-
-        await callback_query.message.delete()
-
+    link = razorpay_client.payment_link.fetch(data["link_id"])
+    if link["status"] == "paid":
+        temp_msg = await callback_query.message.edit("Payment successful! Sending files...")
+        messages = await get_messages(client, data["ids"])
         for msg in messages:
             caption = (
                 CUSTOM_CAPTION.format(
@@ -157,24 +149,53 @@ async def check_payment(client: Client, callback_query: CallbackQuery):
                 ) if bool(CUSTOM_CAPTION) and bool(msg.document) else
                 "" if not msg.caption else msg.caption.html
             )
+            reply_markup = msg.reply_markup if DISABLE_CHANNEL_BUTTON else None
             try:
                 await msg.copy(
-                    chat_id=user_id,
+                    chat_id=callback_query.from_user.id,
                     caption=caption,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=msg.reply_markup if not DISABLE_CHANNEL_BUTTON else None,
+                    reply_markup=reply_markup,
                     protect_content=PROTECT_CONTENT
                 )
                 await asyncio.sleep(0.5)
             except FloodWait as e:
                 await asyncio.sleep(e.x)
-                await msg.copy(chat_id=user_id)
             except:
                 pass
-
-        del client.batch_data[user_id]
+        Bot.batch_data.pop(user_id, None)
+        return
     else:
-        await callback_query.answer("Payment not received yet. Try again after a few seconds.", show_alert=True)
+        await callback_query.answer("Payment not received yet. Please wait a moment and try again.", show_alert=True)
+
+
+@Bot.on_message(filters.command("start") & filters.private)
+async def not_joined(client: Client, message: Message):
+    buttons = [
+        [
+            InlineKeyboardButton("Join Channel", url=client.invitelink),
+            InlineKeyboardButton("Join Channel", url=client.invitelink2),
+        ]
+    ]
+    try:
+        buttons.append([
+            InlineKeyboardButton("Try Again", url=f"https://t.me/{client.username}?start={message.command[1]}")
+        ])
+    except IndexError:
+        pass
+
+    await message.reply(
+        text=FORCE_MSG.format(
+            first=message.from_user.first_name,
+            last=message.from_user.last_name,
+            username=None if not message.from_user.username else '@' + message.from_user.username,
+            mention=message.from_user.mention,
+            id=message.from_user.id
+        ),
+        reply_markup=InlineKeyboardMarkup(buttons),
+        quote=True,
+        disable_web_page_preview=True
+    )
 
 
 @Bot.on_message(filters.command('users') & filters.private & filters.user(ADMINS))
