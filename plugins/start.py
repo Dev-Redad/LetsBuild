@@ -1,92 +1,112 @@
+import os
+import time
+import logging
 import asyncio
 import razorpay
-import qrcode
-import io
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from plugins.database.files import add_user, get_file_details
+from datetime import datetime
+from PIL import Image
+import qrcode
+from io import BytesIO
 
-# Telegram Bot Config
-API_ID = 25533814
-API_HASH = "1df47b6c8c43b3c62533eed9abaf8ef9"
-BOT_TOKEN = "7309627863:AAGBUCS7TIwCyuQirneqpXDxdYaSmNKQGDE"
-CHANNEL_ID = -1002767674889
-
-# Razorpay Keys (Embedded directly)
+# Hardcoded Razorpay credentials
 RAZORPAY_KEY_ID = "rzp_live_Kfvz8iobE8iUZc"
 RAZORPAY_KEY_SECRET = "bcPhJQ2pHTaaF94FhWCEl6eD"
 
-# Init Bot and Razorpay
-bot = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Razorpay client
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
-# Price per batch
-AMOUNT_IN_RUPEES = 2
+# Dictionary to track paid users
+paid_users = {}
 
-@bot.on_message(filters.private & filters.command("start"))
-async def start(client, message: Message):
-    await message.reply_text(
-        "👋 Welcome! Send me a file link or command to get started."
-    )
+app = Client(
+    "bot",
+    api_id=25533814,
+    api_hash="1df47b6c8c43b3c62533eed9abaf8ef9",
+    bot_token="7309627863:AAGBUCS7TIwCyuQirneqpXDxdYaSmNKQGDE"
+)
 
-@bot.on_message(filters.private & filters.regex(r"^https://t\.me/c/\d+/\d+$"))
-async def handle_file_request(client, message: Message):
-    user_id = message.from_user.id
-    amount_paise = AMOUNT_IN_RUPEES * 100
+@app.on_message(filters.command("start") & filters.private)
+async def start_command(client, message: Message):
+    user = message.from_user
+    await add_user(user.id)
 
-    # Create Razorpay Payment Link
-    payment = razorpay_client.payment_link.create({
-        "amount": amount_paise,
-        "currency": "INR",
-        "accept_partial": False,
-        "description": "Access batch",
-        "customer": {
-            "name": str(user_id),
-            "contact": "9123456780",  # optional dummy
-            "email": f"user{user_id}@example.com"
-        },
-        "notify": {"sms": False, "email": False},
-        "reminder_enable": False,
-        "callback_url": "https://google.com",  # placeholder
-        "callback_method": "get"
-    })
+    if len(message.command) > 1:
+        file_id = message.command[1]
+        if user.id in paid_users and paid_users[user.id] == file_id:
+            file_details = await get_file_details(file_id)
+            if file_details:
+                await message.reply_cached_media(file_id, caption=file_details.get("caption"))
+                return
+            else:
+                await message.reply("❌ File not found.")
+                return
 
-    pay_link = payment['short_url']
+        # User has not paid yet → send Razorpay Payment Link
+        try:
+            payment = razorpay_client.payment_link.create({
+                "amount": 200,  # ₹2 in paise
+                "currency": "INR",
+                "description": f"File Access Fee for File ID {file_id}",
+                "customer": {
+                    "name": user.first_name,
+                    "email": f"{user.id}@example.com",
+                    "contact": "9123456789"
+                },
+                "notify": {"sms": False, "email": False},
+                "callback_url": "https://t.me/{client.me.username}?start={file_id}",
+                "callback_method": "get"
+            })
 
-    # Generate QR
-    qr_img = qrcode.make(pay_link)
-    qr_io = io.BytesIO()
-    qr_img.save(qr_io, format='PNG')
-    qr_io.seek(0)
+            link = payment['short_url']
 
-    # Send payment link and QR
-    await message.reply_photo(
-        photo=qr_io,
-        caption=f"💳 Please pay ₹{AMOUNT_IN_RUPEES} to access the batch.\n\nAfter paying, click 'I've Paid' below.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Pay Now", url=pay_link)],
-            [InlineKeyboardButton("✅ I've Paid", callback_data=f"verify|{payment['id']}|{message.text}")]
-        ])
-    )
+            # Generate QR code
+            qr = qrcode.make(link)
+            bio = BytesIO()
+            bio.name = 'qr.png'
+            qr.save(bio, 'PNG')
+            bio.seek(0)
 
-@bot.on_callback_query(filters.regex(r"^verify\|"))
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Pay ₹2 to Unlock", url=link)],
+                [InlineKeyboardButton("I've Paid", callback_data=f"verify_{file_id}")]
+            ])
+
+            await client.send_photo(
+                chat_id=message.chat.id,
+                photo=bio,
+                caption="<b>Pay ₹2 via Razorpay to access the file.</b>",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await message.reply(f"❌ Failed to create payment link.\nError: {e}")
+    else:
+        await message.reply("Hello! Send me a file link to begin.")
+
+@app.on_callback_query(filters.regex("^verify_"))
 async def verify_payment(client, callback_query):
-    data = callback_query.data.split("|")
-    payment_id, file_link = data[1], data[2]
+    user_id = callback_query.from_user.id
+    file_id = callback_query.data.split("_", 1)[1]
 
     try:
-        payment = razorpay_client.payment_link.fetch(payment_id)
-        if payment['status'] == 'paid':
-            await callback_query.message.reply(f"✅ Payment received. Here's your file:", quote=True)
-            await client.copy_message(
-                chat_id=callback_query.from_user.id,
-                from_chat_id=CHANNEL_ID,
-                message_id=int(file_link.split("/")[-1])
-            )
-        else:
-            await callback_query.answer("❌ Payment not yet completed.", show_alert=True)
+        # Check if payment link was paid manually
+        links = razorpay_client.payment_link.all()
+        for link in links['items']:
+            if link['description'].endswith(file_id) and link['status'] == 'paid' and f"{user_id}@example.com" in link['customer']['email']:
+                paid_users[user_id] = file_id
+                await callback_query.message.edit_text("✅ Payment verified! Please tap the file link again to access your file.")
+                return
+        await callback_query.message.edit_text("❌ Payment not found yet. Please complete it and try again in a moment.")
     except Exception as e:
-        await callback_query.answer("⚠️ Error verifying payment.", show_alert=True)
+        await callback_query.message.edit_text(f"❌ Error verifying payment: {e}")
 
-# Run the bot
+
 if __name__ == '__main__':
-    bot.run()
+    import asyncio
+    if not app.is_running:
+        app.run()
+    else:
+        asyncio.get_event_loop().run_until_complete(app.start())
